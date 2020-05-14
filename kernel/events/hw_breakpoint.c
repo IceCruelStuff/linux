@@ -75,8 +75,9 @@ __weak int hw_breakpoint_weight(struct perf_event *bp)
 
 static inline enum bp_type_idx find_slot_idx(u64 bp_type)
 {
-	if (bp_type & HW_BREAKPOINT_RW)
+	if (bp_type & HW_BREAKPOINT_RW) {
 		return TYPE_DATA;
+	}
 
 	return TYPE_INST;
 }
@@ -91,8 +92,9 @@ static unsigned int max_task_bp_pinned(int cpu, enum bp_type_idx type)
 	int i;
 
 	for (i = nr_slots[type] - 1; i >= 0; i--) {
-		if (tsk_pinned[i] > 0)
+		if (tsk_pinned[i] > 0) {
 			return i + 1;
+		}
 	}
 
 	return 0;
@@ -110,9 +112,11 @@ static int task_bp_pinned(int cpu, struct perf_event *bp, enum bp_type_idx type)
 
 	list_for_each_entry(iter, &bp_task_head, hw.bp_list) {
 		if (iter->hw.target == tsk &&
-		    find_slot_idx(iter->attr.bp_type) == type &&
-		    (iter->cpu < 0 || cpu == iter->cpu))
+			find_slot_idx(iter->attr.bp_type) == type &&
+			(iter->cpu < 0 || cpu == iter->cpu)
+		) {
 			count += hw_breakpoint_weight(iter);
+		}
 	}
 
 	return count;
@@ -120,8 +124,9 @@ static int task_bp_pinned(int cpu, struct perf_event *bp, enum bp_type_idx type)
 
 static const struct cpumask *cpumask_of_bp(struct perf_event *bp)
 {
-	if (bp->cpu >= 0)
+	if (bp->cpu >= 0) {
 		return cpumask_of(bp->cpu);
+	}
 	return cpu_possible_mask;
 }
 
@@ -141,17 +146,20 @@ fetch_bp_busy_slots(struct bp_busy_slots *slots, struct perf_event *bp,
 		int nr;
 
 		nr = info->cpu_pinned;
-		if (!bp->hw.target)
+		if (!bp->hw.target) {
 			nr += max_task_bp_pinned(cpu, type);
-		else
+		} else {
 			nr += task_bp_pinned(cpu, bp, type);
+		}
 
-		if (nr > slots->pinned)
+		if (nr > slots->pinned) {
 			slots->pinned = nr;
+		}
 
 		nr = info->flexible;
-		if (nr > slots->flexible)
+		if (nr > slots->flexible) {
 			slots->flexible = nr;
+		}
 	}
 }
 
@@ -178,24 +186,26 @@ static void toggle_bp_task_slot(struct perf_event *bp, int cpu,
 	old_idx = task_bp_pinned(cpu, bp, type) - 1;
 	new_idx = old_idx + weight;
 
-	if (old_idx >= 0)
+	if (old_idx >= 0) {
 		tsk_pinned[old_idx]--;
-	if (new_idx >= 0)
+	}
+	if (new_idx >= 0) {
 		tsk_pinned[new_idx]++;
+	}
 }
 
 /*
  * Add/remove the given breakpoint in our constraint table
  */
 static void
-toggle_bp_slot(struct perf_event *bp, bool enable, enum bp_type_idx type,
-	       int weight)
+toggle_bp_slot(struct perf_event *bp, bool enable, enum bp_type_idx type, int weight)
 {
 	const struct cpumask *cpumask = cpumask_of_bp(bp);
 	int cpu;
 
-	if (!enable)
+	if (!enable) {
 		weight = -weight;
+	}
 
 	/* Pinned counter cpu profiling */
 	if (!bp->hw.target) {
@@ -204,13 +214,15 @@ toggle_bp_slot(struct perf_event *bp, bool enable, enum bp_type_idx type,
 	}
 
 	/* Pinned counter task profiling */
-	for_each_cpu(cpu, cpumask)
+	for_each_cpu(cpu, cpumask) {
 		toggle_bp_task_slot(bp, cpu, type, weight);
+	}
 
-	if (enable)
+	if (enable) {
 		list_add_tail(&bp->hw.bp_list, &bp_task_head);
-	else
+	} else {
 		list_del(&bp->hw.bp_list);
+	}
 }
 
 /*
@@ -272,13 +284,14 @@ static int __reserve_bp_slot(struct perf_event *bp, u64 bp_type)
 	int weight;
 
 	/* We couldn't initialize breakpoint constraints on boot */
-	if (!constraints_initialized)
+	if (!constraints_initialized) {
 		return -ENOMEM;
+	}
 
 	/* Basic checks */
-	if (bp_type == HW_BREAKPOINT_EMPTY ||
-	    bp_type == HW_BREAKPOINT_INVALID)
+	if (bp_type == HW_BREAKPOINT_EMPTY || bp_type == HW_BREAKPOINT_INVALID) {
 		return -EINVAL;
+	}
 
 	type = find_slot_idx(bp_type);
 	weight = hw_breakpoint_weight(bp);
