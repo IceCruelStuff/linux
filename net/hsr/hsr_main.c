@@ -3,9 +3,12 @@
  *
  * Author(s):
  *	2011-2014 Arvid Brodin, arvid.brodin@alten.se
+ *
+ * Event handling for HSR and PRP devices.
  */
 
 #include <linux/netdevice.h>
+#include <net/rtnetlink.h>
 #include <linux/rculist.h>
 #include <linux/timer.h>
 #include <linux/etherdevice.h>
@@ -72,7 +75,7 @@ static int hsr_netdev_notify(struct notifier_block *nb, unsigned long event,
 		master = hsr_port_get_hsr(hsr, HSR_PT_MASTER);
 
 		if (port->type == HSR_PT_SLAVE_A) {
-			ether_addr_copy(master->dev->dev_addr, dev->dev_addr);
+			eth_hw_addr_set(master->dev, dev->dev_addr);
 			call_netdevice_notifiers(NETDEV_CHANGEADDR,
 						 master->dev);
 		}
@@ -100,8 +103,10 @@ static int hsr_netdev_notify(struct notifier_block *nb, unsigned long event,
 			master = hsr_port_get_hsr(port->hsr, HSR_PT_MASTER);
 			hsr_del_port(port);
 			if (hsr_slave_empty(master->hsr)) {
-				unregister_netdevice_queue(master->dev,
-							   &list_kill);
+				const struct rtnl_link_ops *ops;
+
+				ops = master->dev->rtnl_link_ops;
+				ops->dellink(master->dev, &list_kill);
 				unregister_netdevice_many(&list_kill);
 			}
 		}
@@ -126,6 +131,17 @@ struct hsr_port *hsr_port_get_hsr(struct hsr_priv *hsr, enum hsr_port_type pt)
 	return NULL;
 }
 
+int hsr_get_version(struct net_device *dev, enum hsr_version *ver)
+{
+	struct hsr_priv *hsr;
+
+	hsr = netdev_priv(dev);
+	*ver = hsr->prot_version;
+
+	return 0;
+}
+EXPORT_SYMBOL(hsr_get_version);
+
 static struct notifier_block hsr_nb = {
 	.notifier_call = hsr_netdev_notify,	/* Slave event notifications */
 };
@@ -144,9 +160,9 @@ static int __init hsr_init(void)
 
 static void __exit hsr_exit(void)
 {
-	unregister_netdevice_notifier(&hsr_nb);
 	hsr_netlink_exit();
 	hsr_debugfs_remove_root();
+	unregister_netdevice_notifier(&hsr_nb);
 }
 
 module_init(hsr_init);

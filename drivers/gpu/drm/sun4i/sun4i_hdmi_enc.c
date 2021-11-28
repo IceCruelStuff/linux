@@ -259,9 +259,8 @@ sun4i_hdmi_connector_detect(struct drm_connector *connector, bool force)
 	struct sun4i_hdmi *hdmi = drm_connector_to_sun4i_hdmi(connector);
 	unsigned long reg;
 
-	if (readl_poll_timeout(hdmi->base + SUN4I_HDMI_HPD_REG, reg,
-			       reg & SUN4I_HDMI_HPD_HIGH,
-			       0, 500000)) {
+	reg = readl(hdmi->base + SUN4I_HDMI_HPD_REG);
+	if (!(reg & SUN4I_HDMI_HPD_HIGH)) {
 		cec_phys_addr_invalidate(hdmi->cec_adap);
 		return connector_status_disconnected;
 	}
@@ -490,7 +489,6 @@ static int sun4i_hdmi_bind(struct device *dev, struct device *master,
 	struct cec_connector_info conn_info;
 	struct sun4i_drv *drv = drm->dev_private;
 	struct sun4i_hdmi *hdmi;
-	struct resource *res;
 	u32 reg;
 	int ret;
 
@@ -505,8 +503,7 @@ static int sun4i_hdmi_bind(struct device *dev, struct device *master,
 	if (!hdmi->variant)
 		return -EINVAL;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	hdmi->base = devm_ioremap_resource(dev, res);
+	hdmi->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(hdmi->base)) {
 		dev_err(dev, "Couldn't map the HDMI encoder registers\n");
 		return PTR_ERR(hdmi->base);

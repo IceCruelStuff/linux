@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include "afs_fs.h"
 #include "internal.h"
+#include "protocol_afs.h"
 #include "protocol_yfs.h"
 
 static unsigned int afs_fs_probe_fast_poll_interval = 30 * HZ;
@@ -102,7 +103,7 @@ void afs_fileserver_probe_result(struct afs_call *call)
 	struct afs_addr_list *alist = call->alist;
 	struct afs_server *server = call->server;
 	unsigned int index = call->addr_ix;
-	unsigned int rtt_us = 0;
+	unsigned int rtt_us = 0, cap0;
 	int ret = call->error;
 
 	_enter("%pU,%u", &server->uuid, index);
@@ -159,10 +160,15 @@ responded:
 			clear_bit(AFS_SERVER_FL_IS_YFS, &server->flags);
 			alist->addrs[index].srx_service = call->service_id;
 		}
+		cap0 = ntohl(call->tmp);
+		if (cap0 & AFS3_VICED_CAPABILITY_64BITFILES)
+			set_bit(AFS_SERVER_FL_HAS_FS64, &server->flags);
+		else
+			clear_bit(AFS_SERVER_FL_HAS_FS64, &server->flags);
 	}
 
-	rtt_us = rxrpc_kernel_get_srtt(call->net->socket, call->rxcall);
-	if (rtt_us < server->probe.rtt) {
+	if (rxrpc_kernel_get_srtt(call->net->socket, call->rxcall, &rtt_us) &&
+	    rtt_us < server->probe.rtt) {
 		server->probe.rtt = rtt_us;
 		server->rtt = rtt_us;
 		alist->preferred = index;
@@ -314,7 +320,7 @@ void afs_fs_probe_timer(struct timer_list *timer)
 {
 	struct afs_net *net = container_of(timer, struct afs_net, fs_probe_timer);
 
-	if (!queue_work(afs_wq, &net->fs_prober))
+	if (!net->live || !queue_work(afs_wq, &net->fs_prober))
 		afs_dec_servers_outstanding(net);
 }
 
@@ -457,4 +463,13 @@ dont_wait:
 	if (timo == 0)
 		return -ETIME;
 	return -EDESTADDRREQ;
+}
+
+/*
+ * Clean up the probing when the namespace is killed off.
+ */
+void afs_fs_probe_cleanup(struct afs_net *net)
+{
+	if (del_timer_sync(&net->fs_probe_timer))
+		afs_dec_servers_outstanding(net);
 }

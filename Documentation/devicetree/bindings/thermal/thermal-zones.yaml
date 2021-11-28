@@ -215,8 +215,10 @@ patternProperties:
       - polling-delay
       - polling-delay-passive
       - thermal-sensors
-      - trips
+
     additionalProperties: false
+
+additionalProperties: false
 
 examples:
   - |
@@ -224,7 +226,7 @@ examples:
     #include <dt-bindings/thermal/thermal.h>
 
     // Example 1: SDM845 TSENS
-    soc: soc@0 {
+    soc {
             #address-cells = <2>;
             #size-cells = <2>;
 

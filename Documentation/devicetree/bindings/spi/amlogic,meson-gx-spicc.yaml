@@ -34,12 +34,14 @@ properties:
     maxItems: 1
 
   clocks:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: controller register bus clock
+      - description: baud rate generator and delay control clock
 
   clock-names:
-    description: input clock for the baud rate generator
-    items:
-      - const: core
+    minItems: 1
+    maxItems: 2
 
 if:
   properties:
@@ -51,16 +53,21 @@ if:
 then:
   properties:
     clocks:
-      contains:
-        items:
-          - description: controller register bus clock
-          - description: baud rate generator and delay control clock
+      minItems: 2
 
     clock-names:
-      minItems: 2
       items:
         - const: core
         - const: pclk
+
+else:
+  properties:
+    clocks:
+      maxItems: 1
+
+    clock-names:
+      items:
+        - const: core
 
 required:
   - compatible
@@ -68,6 +75,8 @@ required:
   - interrupts
   - clocks
   - clock-names
+
+unevaluatedProperties: false
 
 examples:
   - |
@@ -80,8 +89,8 @@ examples:
           #address-cells = <1>;
           #size-cells = <0>;
 
-          ethernet-switch@0 {
-              compatible = "micrel,ks8995m";
+          display@0 {
+              compatible = "lg,lg4573";
               spi-max-frequency = <1000000>;
               reg = <0>;
           };

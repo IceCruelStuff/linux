@@ -1774,7 +1774,7 @@ static void ath10k_pci_fw_dump_work(struct work_struct *work)
 
 	mutex_unlock(&ar->dump_mutex);
 
-	queue_work(ar->workqueue, &ar->restart_work);
+	ath10k_core_start_recovery(ar);
 }
 
 static void ath10k_pci_fw_crashed_dump(struct ath10k *ar)
@@ -1958,7 +1958,7 @@ static int ath10k_pci_hif_start(struct ath10k *ar)
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot hif start\n");
 
-	napi_enable(&ar->napi);
+	ath10k_core_napi_enable(ar);
 
 	ath10k_pci_irq_enable(ar);
 	ath10k_pci_rx_post(ar);
@@ -2075,8 +2075,9 @@ static void ath10k_pci_hif_stop(struct ath10k *ar)
 
 	ath10k_pci_irq_disable(ar);
 	ath10k_pci_irq_sync(ar);
-	napi_synchronize(&ar->napi);
-	napi_disable(&ar->napi);
+
+	ath10k_core_napi_sync_disable(ar);
+
 	cancel_work_sync(&ar_pci->dump_work);
 
 	/* Most likely the device has HTT Rx ring configured. The only way to
@@ -2184,7 +2185,7 @@ err_req:
 
 	if (ret == 0 && resp_len) {
 		*resp_len = min(*resp_len, xfer.resp_len);
-		memcpy(resp, tresp, xfer.resp_len);
+		memcpy(resp, tresp, *resp_len);
 	}
 err_dma:
 	kfree(treq);
@@ -3236,7 +3237,7 @@ static int ath10k_pci_init_irq(struct ath10k *ar)
 		if (ret == 0)
 			return 0;
 
-		/* fall-through */
+		/* MHI failed, try legacy irq next */
 	}
 
 	/* Try legacy irq
@@ -3392,16 +3393,9 @@ static int ath10k_pci_claim(struct ath10k *ar)
 	}
 
 	/* Target expects 32 bit DMA. Enforce it. */
-	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		ath10k_err(ar, "failed to set dma mask to 32-bit: %d\n", ret);
-		goto err_region;
-	}
-
-	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
-	if (ret) {
-		ath10k_err(ar, "failed to set consistent dma mask to 32-bit: %d\n",
-			   ret);
 		goto err_region;
 	}
 
@@ -3473,6 +3467,28 @@ int ath10k_pci_setup_resource(struct ath10k *ar)
 
 	timer_setup(&ar_pci->rx_post_retry, ath10k_pci_rx_replenish_retry, 0);
 
+	ar_pci->attr = kmemdup(pci_host_ce_config_wlan,
+			       sizeof(pci_host_ce_config_wlan),
+			       GFP_KERNEL);
+	if (!ar_pci->attr)
+		return -ENOMEM;
+
+	ar_pci->pipe_config = kmemdup(pci_target_ce_config_wlan,
+				      sizeof(pci_target_ce_config_wlan),
+				      GFP_KERNEL);
+	if (!ar_pci->pipe_config) {
+		ret = -ENOMEM;
+		goto err_free_attr;
+	}
+
+	ar_pci->serv_to_pipe = kmemdup(pci_target_service_to_ce_map_wlan,
+				       sizeof(pci_target_service_to_ce_map_wlan),
+				       GFP_KERNEL);
+	if (!ar_pci->serv_to_pipe) {
+		ret = -ENOMEM;
+		goto err_free_pipe_config;
+	}
+
 	if (QCA_REV_6174(ar) || QCA_REV_9377(ar))
 		ath10k_pci_override_ce_config(ar);
 
@@ -3480,18 +3496,31 @@ int ath10k_pci_setup_resource(struct ath10k *ar)
 	if (ret) {
 		ath10k_err(ar, "failed to allocate copy engine pipes: %d\n",
 			   ret);
-		return ret;
+		goto err_free_serv_to_pipe;
 	}
 
 	return 0;
+
+err_free_serv_to_pipe:
+	kfree(ar_pci->serv_to_pipe);
+err_free_pipe_config:
+	kfree(ar_pci->pipe_config);
+err_free_attr:
+	kfree(ar_pci->attr);
+	return ret;
 }
 
 void ath10k_pci_release_resource(struct ath10k *ar)
 {
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
+
 	ath10k_pci_rx_retry_sync(ar);
 	netif_napi_del(&ar->napi);
 	ath10k_pci_ce_deinit(ar);
 	ath10k_pci_free_pipes(ar);
+	kfree(ar_pci->attr);
+	kfree(ar_pci->pipe_config);
+	kfree(ar_pci->serv_to_pipe);
 }
 
 static const struct ath10k_bus_ops ath10k_pci_bus_ops = {
@@ -3601,30 +3630,6 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 
 	timer_setup(&ar_pci->ps_timer, ath10k_pci_ps_timer, 0);
 
-	ar_pci->attr = kmemdup(pci_host_ce_config_wlan,
-			       sizeof(pci_host_ce_config_wlan),
-			       GFP_KERNEL);
-	if (!ar_pci->attr) {
-		ret = -ENOMEM;
-		goto err_free;
-	}
-
-	ar_pci->pipe_config = kmemdup(pci_target_ce_config_wlan,
-				      sizeof(pci_target_ce_config_wlan),
-				      GFP_KERNEL);
-	if (!ar_pci->pipe_config) {
-		ret = -ENOMEM;
-		goto err_free;
-	}
-
-	ar_pci->serv_to_pipe = kmemdup(pci_target_service_to_ce_map_wlan,
-				       sizeof(pci_target_service_to_ce_map_wlan),
-				       GFP_KERNEL);
-	if (!ar_pci->serv_to_pipe) {
-		ret = -ENOMEM;
-		goto err_free;
-	}
-
 	ret = ath10k_pci_setup_resource(ar);
 	if (ret) {
 		ath10k_err(ar, "failed to setup resource: %d\n", ret);
@@ -3673,8 +3678,10 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 			ath10k_pci_soc_read32(ar, SOC_CHIP_ID_ADDRESS);
 		if (bus_params.chip_id != 0xffffffff) {
 			if (!ath10k_pci_chip_is_supported(pdev->device,
-							  bus_params.chip_id))
+							  bus_params.chip_id)) {
+				ret = -ENODEV;
 				goto err_unsupported;
+			}
 		}
 	}
 
@@ -3685,11 +3692,15 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 	}
 
 	bus_params.chip_id = ath10k_pci_soc_read32(ar, SOC_CHIP_ID_ADDRESS);
-	if (bus_params.chip_id == 0xffffffff)
+	if (bus_params.chip_id == 0xffffffff) {
+		ret = -ENODEV;
 		goto err_unsupported;
+	}
 
-	if (!ath10k_pci_chip_is_supported(pdev->device, bus_params.chip_id))
-		goto err_free_irq;
+	if (!ath10k_pci_chip_is_supported(pdev->device, bus_params.chip_id)) {
+		ret = -ENODEV;
+		goto err_unsupported;
+	}
 
 	ret = ath10k_core_register(ar, &bus_params);
 	if (ret) {
@@ -3705,10 +3716,9 @@ err_unsupported:
 
 err_free_irq:
 	ath10k_pci_free_irq(ar);
-	ath10k_pci_rx_retry_sync(ar);
 
 err_deinit_irq:
-	ath10k_pci_deinit_irq(ar);
+	ath10k_pci_release_resource(ar);
 
 err_sleep:
 	ath10k_pci_sleep_sync(ar);
@@ -3720,27 +3730,16 @@ err_free_pipes:
 err_core_destroy:
 	ath10k_core_destroy(ar);
 
-err_free:
-	kfree(ar_pci->attr);
-	kfree(ar_pci->pipe_config);
-	kfree(ar_pci->serv_to_pipe);
-
 	return ret;
 }
 
 static void ath10k_pci_remove(struct pci_dev *pdev)
 {
 	struct ath10k *ar = pci_get_drvdata(pdev);
-	struct ath10k_pci *ar_pci;
 
 	ath10k_dbg(ar, ATH10K_DBG_PCI, "pci remove\n");
 
 	if (!ar)
-		return;
-
-	ar_pci = ath10k_pci_priv(ar);
-
-	if (!ar_pci)
 		return;
 
 	ath10k_core_unregister(ar);
@@ -3750,9 +3749,6 @@ static void ath10k_pci_remove(struct pci_dev *pdev)
 	ath10k_pci_sleep_sync(ar);
 	ath10k_pci_release(ar);
 	ath10k_core_destroy(ar);
-	kfree(ar_pci->attr);
-	kfree(ar_pci->pipe_config);
-	kfree(ar_pci->serv_to_pipe);
 }
 
 MODULE_DEVICE_TABLE(pci, ath10k_pci_id_table);

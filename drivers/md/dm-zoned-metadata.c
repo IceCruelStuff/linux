@@ -819,7 +819,7 @@ static int dmz_write_sb(struct dmz_metadata *zmd, unsigned int set)
 	ret = dmz_rdwr_block(dev, REQ_OP_WRITE, zmd->sb[set].block,
 			     mblk->page);
 	if (ret == 0)
-		ret = blkdev_issue_flush(dev->bdev, GFP_NOIO);
+		ret = blkdev_issue_flush(dev->bdev);
 
 	return ret;
 }
@@ -862,7 +862,7 @@ static int dmz_write_dirty_mblocks(struct dmz_metadata *zmd,
 
 	/* Flush drive cache (this will also sync data) */
 	if (ret == 0)
-		ret = blkdev_issue_flush(dev->bdev, GFP_NOIO);
+		ret = blkdev_issue_flush(dev->bdev);
 
 	return ret;
 }
@@ -933,7 +933,7 @@ int dmz_flush_metadata(struct dmz_metadata *zmd)
 
 	/* If there are no dirty metadata blocks, just flush the device cache */
 	if (list_empty(&write_list)) {
-		ret = blkdev_issue_flush(dev->bdev, GFP_NOIO);
+		ret = blkdev_issue_flush(dev->bdev);
 		goto err;
 	}
 
@@ -1078,7 +1078,8 @@ static int dmz_check_sb(struct dmz_metadata *zmd, struct dmz_sb *dsb,
 	nr_meta_zones = (le32_to_cpu(sb->nr_meta_blocks) + zmd->zone_nr_blocks - 1)
 		>> zmd->zone_nr_blocks_shift;
 	if (!nr_meta_zones ||
-	    nr_meta_zones >= zmd->nr_rnd_zones) {
+	    (zmd->nr_devs <= 1 && nr_meta_zones >= zmd->nr_rnd_zones) ||
+	    (zmd->nr_devs > 1 && nr_meta_zones >= zmd->nr_cache_zones)) {
 		dmz_dev_err(dev, "Invalid number of metadata blocks");
 		return -ENXIO;
 	}
@@ -1388,6 +1389,13 @@ static int dmz_init_zone(struct blk_zone *blkz, unsigned int num, void *data)
 			return 0;
 		return -ENXIO;
 	}
+
+	/*
+	 * Devices that have zones with a capacity smaller than the zone size
+	 * (e.g. NVMe zoned namespaces) are not supported.
+	 */
+	if (blkz->capacity != blkz->len)
+		return -ENXIO;
 
 	switch (blkz->type) {
 	case BLK_ZONE_TYPE_CONVENTIONAL:
@@ -1949,7 +1957,7 @@ static struct dm_zone *dmz_get_rnd_zone_for_reclaim(struct dmz_metadata *zmd,
 						    unsigned int idx, bool idle)
 {
 	struct dm_zone *dzone = NULL;
-	struct dm_zone *zone, *last = NULL;
+	struct dm_zone *zone, *maxw_z = NULL;
 	struct list_head *zone_list;
 
 	/* If we have cache zones select from the cache zone list */
@@ -1961,18 +1969,37 @@ static struct dm_zone *dmz_get_rnd_zone_for_reclaim(struct dmz_metadata *zmd,
 	} else
 		zone_list = &zmd->dev[idx].map_rnd_list;
 
+	/*
+	 * Find the buffer zone with the heaviest weight or the first (oldest)
+	 * data zone that can be reclaimed.
+	 */
 	list_for_each_entry(zone, zone_list, link) {
 		if (dmz_is_buf(zone)) {
 			dzone = zone->bzone;
-			if (dzone->dev->dev_idx != idx)
+			if (dmz_is_rnd(dzone) && dzone->dev->dev_idx != idx)
 				continue;
-			if (!last) {
-				last = dzone;
+			if (!maxw_z || maxw_z->weight < dzone->weight)
+				maxw_z = dzone;
+		} else {
+			dzone = zone;
+			if (dmz_lock_zone_reclaim(dzone))
+				return dzone;
+		}
+	}
+
+	if (maxw_z && dmz_lock_zone_reclaim(maxw_z))
+		return maxw_z;
+
+	/*
+	 * If we come here, none of the zones inspected could be locked for
+	 * reclaim. Try again, being more aggressive, that is, find the
+	 * first zone that can be reclaimed regardless of its weitght.
+	 */
+	list_for_each_entry(zone, zone_list, link) {
+		if (dmz_is_buf(zone)) {
+			dzone = zone->bzone;
+			if (dmz_is_rnd(dzone) && dzone->dev->dev_idx != idx)
 				continue;
-			}
-			if (last->weight < dzone->weight)
-				continue;
-			dzone = last;
 		} else
 			dzone = zone;
 		if (dmz_lock_zone_reclaim(dzone))
@@ -2006,7 +2033,7 @@ static struct dm_zone *dmz_get_seq_zone_for_reclaim(struct dmz_metadata *zmd,
 struct dm_zone *dmz_get_zone_for_reclaim(struct dmz_metadata *zmd,
 					 unsigned int dev_idx, bool idle)
 {
-	struct dm_zone *zone;
+	struct dm_zone *zone = NULL;
 
 	/*
 	 * Search for a zone candidate to reclaim: 2 cases are possible.
@@ -2019,7 +2046,7 @@ struct dm_zone *dmz_get_zone_for_reclaim(struct dmz_metadata *zmd,
 	dmz_lock_map(zmd);
 	if (list_empty(&zmd->reserved_seq_zones_list))
 		zone = dmz_get_seq_zone_for_reclaim(zmd, dev_idx);
-	else
+	if (!zone)
 		zone = dmz_get_rnd_zone_for_reclaim(zmd, dev_idx, idle);
 	dmz_unlock_map(zmd);
 
@@ -2197,8 +2224,15 @@ struct dm_zone *dmz_alloc_zone(struct dmz_metadata *zmd, unsigned int dev_idx,
 {
 	struct list_head *list;
 	struct dm_zone *zone;
-	int i = 0;
+	int i;
 
+	/* Schedule reclaim to ensure free zones are available */
+	if (!(flags & DMZ_ALLOC_RECLAIM)) {
+		for (i = 0; i < zmd->nr_devs; i++)
+			dmz_schedule_reclaim(zmd->dev[i].reclaim);
+	}
+
+	i = 0;
 again:
 	if (flags & DMZ_ALLOC_CACHE)
 		list = &zmd->unmap_cache_list;

@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2014 The Linux Foundation
  */
-#include <linux/dma-mapping.h>
+#include <linux/dma-map-ops.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 
@@ -24,7 +24,8 @@ void *dma_common_pages_remap(struct page **pages, size_t size,
 {
 	void *vaddr;
 
-	vaddr = vmap(pages, size >> PAGE_SHIFT, VM_DMA_COHERENT, prot);
+	vaddr = vmap(pages, PAGE_ALIGN(size) >> PAGE_SHIFT,
+		     VM_DMA_COHERENT, prot);
 	if (vaddr)
 		find_vm_area(vaddr)->pages = pages;
 	return vaddr;
@@ -37,7 +38,7 @@ void *dma_common_pages_remap(struct page **pages, size_t size,
 void *dma_common_contiguous_remap(struct page *page, size_t size,
 			pgprot_t prot, const void *caller)
 {
-	int count = size >> PAGE_SHIFT;
+	int count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	struct page **pages;
 	void *vaddr;
 	int i;
@@ -65,6 +66,5 @@ void dma_common_free_remap(void *cpu_addr, size_t size)
 		return;
 	}
 
-	unmap_kernel_range((unsigned long)cpu_addr, PAGE_ALIGN(size));
 	vunmap(cpu_addr);
 }

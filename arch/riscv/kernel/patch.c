@@ -20,7 +20,12 @@ struct patch_insn {
 };
 
 #ifdef CONFIG_MMU
-static void *patch_map(void *addr, int fixmap)
+/*
+ * The fix_to_virt(, idx) needs a const value (not a dynamic variable of
+ * reg-a0) or BUILD_BUG_ON failed with "idx >= __end_of_fixed_addresses".
+ * So use '__always_inline' and 'const unsigned int fixmap' here.
+ */
+static __always_inline void *patch_map(void *addr, const unsigned int fixmap)
 {
 	uintptr_t uintaddr = (uintptr_t) addr;
 	struct page *page;
@@ -37,7 +42,6 @@ static void *patch_map(void *addr, int fixmap)
 	return (void *)set_fixmap_offset(fixmap, page_to_phys(page) +
 					 (uintaddr & ~PAGE_MASK));
 }
-NOKPROBE_SYMBOL(patch_map);
 
 static void patch_unmap(int fixmap)
 {
@@ -63,7 +67,7 @@ static int patch_insn_write(void *addr, const void *insn, size_t len)
 
 	waddr = patch_map(addr, FIX_TEXT_POKE0);
 
-	ret = probe_kernel_write(waddr, insn, len);
+	ret = copy_to_kernel_nofault(waddr, insn, len);
 
 	patch_unmap(FIX_TEXT_POKE0);
 
@@ -76,7 +80,7 @@ NOKPROBE_SYMBOL(patch_insn_write);
 #else
 static int patch_insn_write(void *addr, const void *insn, size_t len)
 {
-	return probe_kernel_write(addr, insn, len);
+	return copy_to_kernel_nofault(addr, insn, len);
 }
 NOKPROBE_SYMBOL(patch_insn_write);
 #endif /* CONFIG_MMU */

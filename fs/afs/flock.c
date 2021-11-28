@@ -175,10 +175,7 @@ static void afs_kill_lockers_enoent(struct afs_vnode *vnode)
 
 static void afs_lock_success(struct afs_operation *op)
 {
-	struct afs_vnode *vnode = op->file[0].vnode;
-
 	_enter("op=%08x", op->debug_id);
-	afs_check_for_remote_deletion(op, vnode);
 	afs_vnode_commit_status(op, &op->file[0]);
 }
 
@@ -186,6 +183,7 @@ static const struct afs_operation_ops afs_set_lock_operation = {
 	.issue_afs_rpc	= afs_fs_set_lock,
 	.issue_yfs_rpc	= yfs_fs_set_lock,
 	.success	= afs_lock_success,
+	.aborted	= afs_check_for_remote_deletion,
 };
 
 /*
@@ -378,7 +376,6 @@ again:
 		spin_unlock(&vnode->lock);
 		return;
 
-		/* Fall through */
 	default:
 		/* Looks like a lock request was withdrawn. */
 		spin_unlock(&vnode->lock);
@@ -774,10 +771,6 @@ int afs_lock(struct file *file, int cmd, struct file_lock *fl)
 	       vnode->fid.vid, vnode->fid.vnode, cmd,
 	       fl->fl_type, fl->fl_flags,
 	       (long long) fl->fl_start, (long long) fl->fl_end);
-
-	/* AFS doesn't support mandatory locks */
-	if (__mandatory_lock(&vnode->vfs_inode) && fl->fl_type != F_UNLCK)
-		return -ENOLCK;
 
 	if (IS_GETLK(cmd))
 		return afs_do_getlk(file, fl);

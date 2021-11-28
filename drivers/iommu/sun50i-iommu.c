@@ -7,7 +7,6 @@
 #include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/dma-direction.h>
-#include <linux/dma-iommu.h>
 #include <linux/dma-mapping.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -313,9 +312,9 @@ static int sun50i_iommu_flush_all_tlb(struct sun50i_iommu *iommu)
 		    IOMMU_TLB_FLUSH_MICRO_TLB(1) |
 		    IOMMU_TLB_FLUSH_MICRO_TLB(0));
 
-	ret = readl_poll_timeout(iommu->base + IOMMU_TLB_FLUSH_REG,
-				 reg, !reg,
-				 1, 2000);
+	ret = readl_poll_timeout_atomic(iommu->base + IOMMU_TLB_FLUSH_REG,
+					reg, !reg,
+					1, 2000);
 	if (ret)
 		dev_warn(iommu->dev, "TLB Flush timed out!\n");
 
@@ -556,7 +555,6 @@ static size_t sun50i_iommu_unmap(struct iommu_domain *domain, unsigned long iova
 {
 	struct sun50i_iommu_domain *sun50i_domain = to_sun50i_domain(domain);
 	phys_addr_t pt_phys;
-	dma_addr_t pte_dma;
 	u32 *pte_addr;
 	u32 dte;
 
@@ -566,7 +564,6 @@ static size_t sun50i_iommu_unmap(struct iommu_domain *domain, unsigned long iova
 
 	pt_phys = sun50i_dte_get_pt_address(dte);
 	pte_addr = (u32 *)phys_to_virt(pt_phys) + sun50i_iova_get_pte_index(iova);
-	pte_dma = pt_phys + sun50i_iova_get_pte_index(iova) * PT_ENTRY_SIZE;
 
 	if (!sun50i_pte_is_page_valid(*pte_addr))
 		return 0;
@@ -612,14 +609,10 @@ static struct iommu_domain *sun50i_iommu_domain_alloc(unsigned type)
 	if (!sun50i_domain)
 		return NULL;
 
-	if (type == IOMMU_DOMAIN_DMA &&
-	    iommu_get_dma_cookie(&sun50i_domain->domain))
-		goto err_free_domain;
-
 	sun50i_domain->dt = (u32 *)__get_free_pages(GFP_KERNEL | __GFP_ZERO,
 						    get_order(DT_SIZE));
 	if (!sun50i_domain->dt)
-		goto err_put_cookie;
+		goto err_free_domain;
 
 	refcount_set(&sun50i_domain->refcnt, 1);
 
@@ -628,10 +621,6 @@ static struct iommu_domain *sun50i_iommu_domain_alloc(unsigned type)
 	sun50i_domain->domain.geometry.force_aperture = true;
 
 	return &sun50i_domain->domain;
-
-err_put_cookie:
-	if (type == IOMMU_DOMAIN_DMA)
-		iommu_put_dma_cookie(&sun50i_domain->domain);
 
 err_free_domain:
 	kfree(sun50i_domain);
@@ -645,8 +634,6 @@ static void sun50i_iommu_domain_free(struct iommu_domain *domain)
 
 	free_pages((unsigned long)sun50i_domain->dt, get_order(DT_SIZE));
 	sun50i_domain->dt = NULL;
-
-	iommu_put_dma_cookie(domain);
 
 	kfree(sun50i_domain);
 }
@@ -883,7 +870,6 @@ static phys_addr_t sun50i_iommu_handle_perm_irq(struct sun50i_iommu *iommu)
 static irqreturn_t sun50i_iommu_irq(int irq, void *dev_id)
 {
 	struct sun50i_iommu *iommu = dev_id;
-	phys_addr_t iova;
 	u32 status;
 
 	spin_lock(&iommu->iommu_lock);
@@ -895,15 +881,15 @@ static irqreturn_t sun50i_iommu_irq(int irq, void *dev_id)
 	}
 
 	if (status & IOMMU_INT_INVALID_L2PG)
-		iova = sun50i_iommu_handle_pt_irq(iommu,
-						  IOMMU_INT_ERR_ADDR_L2_REG,
-						  IOMMU_L2PG_INT_REG);
+		sun50i_iommu_handle_pt_irq(iommu,
+					    IOMMU_INT_ERR_ADDR_L2_REG,
+					    IOMMU_L2PG_INT_REG);
 	else if (status & IOMMU_INT_INVALID_L1PG)
-		iova = sun50i_iommu_handle_pt_irq(iommu,
-						  IOMMU_INT_ERR_ADDR_L1_REG,
-						  IOMMU_L1PG_INT_REG);
+		sun50i_iommu_handle_pt_irq(iommu,
+					   IOMMU_INT_ERR_ADDR_L1_REG,
+					   IOMMU_L1PG_INT_REG);
 	else
-		iova = sun50i_iommu_handle_perm_irq(iommu);
+		sun50i_iommu_handle_perm_irq(iommu);
 
 	iommu_write(iommu, IOMMU_INT_CLR_REG, status);
 
@@ -971,10 +957,7 @@ static int sun50i_iommu_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_free_group;
 
-	iommu_device_set_ops(&iommu->iommu, &sun50i_iommu_ops);
-	iommu_device_set_fwnode(&iommu->iommu, &pdev->dev.of_node->fwnode);
-
-	ret = iommu_device_register(&iommu->iommu);
+	ret = iommu_device_register(&iommu->iommu, &sun50i_iommu_ops, &pdev->dev);
 	if (ret)
 		goto err_remove_sysfs;
 
